@@ -152,10 +152,10 @@ def search(q: str, debug: bool = False):
             score = 100
         else:
             score = max(
-                fuzz.partial_ratio(q, name),
-                fuzz.partial_ratio(q, text),
-                fuzz.token_set_ratio(q, text)
-            )
+    fuzz.token_set_ratio(q, text),     # best for unordered words
+    fuzz.token_sort_ratio(q, text),    # best for same words diff order
+    fuzz.partial_ratio(q, text)        # fallback
+)
 
         if score > 50:
             item = doc.copy()
