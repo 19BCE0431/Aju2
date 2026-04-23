@@ -23,23 +23,51 @@ st.title("📊 Financial PDF Smart Search")
 #     else:
 #         st.error("❌ Upload failed")
 
-file = st.file_uploader("Upload your PDF")
 
-if file:
-    files = {
-        "file": (file.name, file.getvalue(), "application/pdf")
-    }
+# ---------------------------
+# UPLOAD API
+# ---------------------------
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    global documents
+    documents = []
 
-    try:
-        res = requests.post(f"{API_URL}/upload", files=files, timeout=60)
+    content = await file.read()
+    doc = fitz.open(stream=content, filetype="pdf")
 
-        if res.status_code == 200:
-            st.success("✅ PDF uploaded & processed")
+    lines = []
+
+    for page in doc:
+        text = page.get_text()
+        lines.extend(text.split("\n"))
+
+    current_block = ""
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # New transaction starts with date
+        if re.match(r"\d{2}/\d{2}/\d{2}", line):
+            if current_block:
+                parsed = parse_row(current_block)
+                if parsed:
+                    documents.append(parsed)
+
+            current_block = line
         else:
-            st.error(f"❌ Upload failed: {res.text}")
+            current_block += " " + line
 
-    except Exception as e:
-        st.error(f"Error: {e}")
+    # Last block
+    if current_block:
+        parsed = parse_row(current_block)
+        if parsed:
+            documents.append(parsed)
+
+    return {"message": f"{len(documents)} rows processed"}
+
+
 
 
 # ---------------------------
