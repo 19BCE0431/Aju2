@@ -4,7 +4,7 @@ import pandas as pd
 
 # sd
 
-API_URL = "https://aju-production.up.railway.app"
+API_URL = "https://aju2-production.up.railway.app"
 
 st.title("📊 Financial PDF Smart Search")
 
