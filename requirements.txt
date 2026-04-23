@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+PyMuPDF
+rapidfuzz
+python-multipart
+pandas
+requests
