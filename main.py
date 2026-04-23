@@ -54,15 +54,19 @@ def parse_row(text):
     if len(name) < 3:
         return None
 
-    return {
-        "date": date,
-        "name": name,
-        "debit": debit,
-        "credit": credit,
-        "balance": balance,
-        "text": text.lower()
-    }
+    print("----")
+    print("TEXT:", text)
+    print("NUMBERS:", numbers)
 
+    return {
+    "date": date,
+    "name": name,
+    "debit": debit,
+    "credit": credit,
+    "balance": balance,
+    "numbers": numbers,   # ✅ DEBUG FIELD
+    "text": text.lower()
+}
 
 # ---------------------------
 # UPLOAD API
@@ -112,7 +116,8 @@ async def upload(file: UploadFile = File(...)):
 # SEARCH API (FUZZY)
 # ---------------------------
 @app.get("/search")
-def search(q: str):
+def search(q: str, debug: bool = False):
+# def search(q: str):
     q = q.lower().strip()
 
     results = []
@@ -124,7 +129,11 @@ def search(q: str):
 
         if score > 70:
             doc["score"] = score
+            if not debug:
+                doc = {k: v for k, v in doc.items() if k != "numbers"}
+            
             results.append(doc)
+            # results.append(doc)
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
