@@ -1,173 +1,48 @@
-from fastapi import FastAPI, UploadFile, File
-import fitz  # PyMuPDF
-import re
-from rapidfuzz import fuzz
-
-app = FastAPI()
-
-# dd
-
-documents = []
-
-# ---------------------------
-# PARSE FUNCTION (CLEAN)
-# ---------------------------
-def parse_row(text):
-    text = " ".join(text.split())
-
-    # Skip header rows
-    if "date" in text.lower() and "balance" in text.lower():
-        return None
-
-    # Extract date
-    date_match = re.search(r"\d{2}/\d{2}/\d{2}", text)
-    if not date_match:
-        return None
-
-    date = date_match.group()
-
-    # numbers = re.findall(r"\d+(?:,\d{3})*(?:\.\d{2})?", text)
-    # numbers = [float(n.replace(",", "")) for n in numbers]
 
 
-    # debit, credit, balance = 0, 0, 0
+import streamlit as st
+import requests
+import pandas as pd
 
-    # if len(numbers) >= 2:
-    #     balance = numbers[-1]
-    
-    #     # Transaction amount is second last
-    #     txn = numbers[-2]
-    
-    #     # Decide debit/credit using keywords
-    #     if any(x in text.lower() for x in ["upi", "pay", "purchase", "debit"]):
-    #         debit = txn
-    #     else:
-    #         credit = txn
+API_URL = "https://aju-production.up.railway.app"
 
-    # numbers = re.findall(r"\d+(?:,\d{3})*(?:\.\d{2})?", text)
-    # numbers = [float(n.replace(",", "")) for n in numbers]
-    
-    # debit, credit, balance = 0, 0, 0
-    
-    # if len(numbers) >= 2:
-    #     balance = numbers[-1]
-    #     txn = numbers[-2]
-    
-    #     # 🔥 KEY LOGIC
-    #     # If only 2 numbers → assume credit
-    #     if len(numbers) == 2:
-    #         credit = txn
-    #     else:
-    #         # If 3+ numbers → assume format has both debit & credit
-    #         debit = numbers[-3]
-    #         credit = txn
+st.title("📊 Financial PDF Smart Search")
 
-    numbers = re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
-    numbers = [float(n.replace(",", "")) for n in numbers]
-    
-    debit, credit, balance = 0, 0, 0
-    
-    if len(numbers) >= 2:
-        balance = numbers[-1]
-        txn = numbers[-2]
-    
-        # Since PDF loses column structure:
-        # assume single amount = credit (safe default)
-        credit = txn
+file = st.file_uploader("Upload your PDF")
+# files = {"file": (file.name, file.getvalue(), "application/pdf")}
 
-    # Clean name
-    name = text
-    name = re.sub(r"\d{2}/\d{2}/\d{2}", "", name)
-    name = re.sub(r"\d{1,3}(?:,\d{3})*\.\d{2}", "", name)
-    name = re.sub(r"\b\d+\b", "", name)
-    name = re.sub(r"[^\w\s]", "", name)
-    name = " ".join(name.split())
+if file:
+    files = {"file": file.getvalue()}
+    files = {"file": (file.name, file.getvalue(), "application/pdf")}
+    res = requests.post(f"{API_URL}/upload", files=files)
 
-    if len(name) < 3:
-        return None
+    if res.status_code == 200:
+        st.success("✅ PDF uploaded & processed")
+    else:
+        st.error("❌ Upload failed")
 
-    return {
-        "date": date,
-        "name": name,
-        "debit": debit,
-        "credit": credit,
-        "balance": balance,
-        "text": text.lower()
-    }
+query = st.text_input("🔍 Search (example: chethana)")
 
+if query:
+    res = requests.get(f"{API_URL}/search", params={"q": query})
 
-# ---------------------------
-# UPLOAD API
-# ---------------------------
-@app.post("/upload")
-async def upload(file: UploadFile = File(...)):
-    global documents
-    documents = []
+    if res.status_code == 200:
+        response = res.json()
+        data = response.get("results", [])
 
-    content = await file.read()
-    doc = fitz.open(stream=content, filetype="pdf")
-
-    lines = []
-
-    for page in doc:
-        text = page.get_text()
-        lines.extend(text.split("\n"))
-
-    current_block = ""
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        # New transaction starts with date
-        if re.match(r"\d{2}/\d{2}/\d{2}", line):
-            if current_block:
-                parsed = parse_row(current_block)
-                if parsed:
-                    documents.append(parsed)
-
-            current_block = line
+        if not data:
+            st.warning("No results found")
         else:
-            current_block += " " + line
+            df = pd.DataFrame(data)
 
-    # Last block
-    if current_block:
-        parsed = parse_row(current_block)
-        if parsed:
-            documents.append(parsed)
+            for col in ["debit", "credit", "balance"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    return {"message": f"{len(documents)} rows processed"}
+            st.subheader("Results")
+            st.dataframe(df)
 
+            st.markdown(f"### 💰 Total Credit: ₹ {response.get('total_credit', 0)}")
 
-# ---------------------------
-# SEARCH API (FUZZY)
-# ---------------------------
-@app.get("/search")
-def search(q: str):
-    q = q.lower().strip()
-
-    results = []
-
-    for doc in documents:
-        name = doc.get("name", "").lower()
-
-        score = fuzz.partial_ratio(q, name)
-
-        if score > 70:
-            doc["score"] = score
-            results.append(doc)
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-
-    return {
-        "results": results,
-        "total_credit": sum(r["credit"] for r in results)
-    }
-
-
-
-
-
-
-
+    else:
+        st.error("Search failed")
