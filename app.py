@@ -11,17 +11,35 @@ st.title("📊 Financial PDF Smart Search")
 # ---------------------------
 # UPLOAD
 # ---------------------------
+# file = st.file_uploader("Upload your PDF")
+
+# if file:
+#     files = {"file": file.getvalue()}
+
+#     res = requests.post(f"{API_URL}/upload", files=files)
+
+#     if res.status_code == 200:
+#         st.success("✅ PDF uploaded & processed")
+#     else:
+#         st.error("❌ Upload failed")
+
 file = st.file_uploader("Upload your PDF")
 
 if file:
-    files = {"file": file.getvalue()}
+    files = {
+        "file": (file.name, file.getvalue(), "application/pdf")
+    }
 
-    res = requests.post(f"{API_URL}/upload", files=files)
+    try:
+        res = requests.post(f"{API_URL}/upload", files=files, timeout=60)
 
-    if res.status_code == 200:
-        st.success("✅ PDF uploaded & processed")
-    else:
-        st.error("❌ Upload failed")
+        if res.status_code == 200:
+            st.success("✅ PDF uploaded & processed")
+        else:
+            st.error(f"❌ Upload failed: {res.text}")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
 
 
 # ---------------------------
