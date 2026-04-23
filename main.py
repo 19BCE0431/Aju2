@@ -15,71 +15,39 @@ documents = []
 def parse_row(text):
     text = " ".join(text.split())
 
-    # Skip header rows
     if "date" in text.lower() and "balance" in text.lower():
         return None
 
-    # Extract date
     date_match = re.search(r"\d{2}/\d{2}/\d{2}", text)
     if not date_match:
         return None
 
     date = date_match.group()
 
-    # numbers = re.findall(r"\d+(?:,\d{3})*(?:\.\d{2})?", text)
-    # numbers = [float(n.replace(",", "")) for n in numbers]
-
-
-    # debit, credit, balance = 0, 0, 0
-
-    # if len(numbers) >= 2:
-    #     balance = numbers[-1]
-    
-    #     # Transaction amount is second last
-    #     txn = numbers[-2]
-    
-    #     # Decide debit/credit using keywords
-    #     if any(x in text.lower() for x in ["upi", "pay", "purchase", "debit"]):
-    #         debit = txn
-    #     else:
-    #         credit = txn
-
-    # numbers = re.findall(r"\d+(?:,\d{3})*(?:\.\d{2})?", text)
-    # numbers = [float(n.replace(",", "")) for n in numbers]
-    
-    # debit, credit, balance = 0, 0, 0
-    
-    # if len(numbers) >= 2:
-    #     balance = numbers[-1]
-    #     txn = numbers[-2]
-    
-    #     # 🔥 KEY LOGIC
-    #     # If only 2 numbers → assume credit
-    #     if len(numbers) == 2:
-    #         credit = txn
-    #     else:
-    #         # If 3+ numbers → assume format has both debit & credit
-    #         debit = numbers[-3]
-    #         credit = txn
-
     numbers = re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
     numbers = [float(n.replace(",", "")) for n in numbers]
-    
+
     debit, credit, balance = 0, 0, 0
-    
+
     if len(numbers) >= 2:
         balance = numbers[-1]
         txn = numbers[-2]
-    
-        # Since PDF loses column structure:
-        # assume single amount = credit (safe default)
-        credit = txn
 
-    # Clean name
+        lower = text.lower()
+
+        debit_keywords = ["upi", "debit", "purchase", "amazon", "swiggy", "payment", "paid"]
+        credit_keywords = ["credit", "deposit", "received", "refund", "imps"]
+
+        if any(k in lower for k in debit_keywords):
+            debit = txn
+        elif any(k in lower for k in credit_keywords):
+            credit = txn
+        else:
+            credit = txn  # fallback
+
     name = text
     name = re.sub(r"\d{2}/\d{2}/\d{2}", "", name)
     name = re.sub(r"\d{1,3}(?:,\d{3})*\.\d{2}", "", name)
-    name = re.sub(r"\b\d+\b", "", name)
     name = re.sub(r"[^\w\s]", "", name)
     name = " ".join(name.split())
 
