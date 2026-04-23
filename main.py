@@ -139,23 +139,32 @@ async def upload(file: UploadFile = File(...)):
 # ---------------------------
 @app.get("/search")
 def search(q: str, debug: bool = False):
-# def search(q: str):
-    q = q.lower().strip()
+    q = re.sub(r"[^a-zA-Z0-9 ]", "", q.lower().strip())
 
     results = []
 
     for doc in documents:
-        name = doc.get("name", "").lower()
+        text = doc.get("text", "")
+        name = doc.get("name", "")
 
-        score = fuzz.partial_ratio(q, name)
+        # Exact boost
+        if q in text:
+            score = 100
+        else:
+            score = max(
+                fuzz.partial_ratio(q, name),
+                fuzz.partial_ratio(q, text),
+                fuzz.token_set_ratio(q, text)
+            )
 
-        if score > 70:
-            doc["score"] = score
+        if score > 50:
+            item = doc.copy()
+            item["score"] = score
+
             if not debug:
-                doc = {k: v for k, v in doc.items() if k != "numbers"}
-            
-            results.append(doc)
-            # results.append(doc)
+                item.pop("numbers", None)
+
+            results.append(item)
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
