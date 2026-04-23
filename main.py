@@ -13,72 +13,51 @@ documents = []
 # PARSE FUNCTION (CLEAN)
 # ---------------------------
 def parse_row(text):
+    original_text = text
+
     text = " ".join(text.split())
 
-    if "date" in text.lower() and "balance" in text.lower():
-        return None
-
+    # Extract date
     date_match = re.search(r"\d{2}/\d{2}/\d{2}", text)
     if not date_match:
         return None
 
     date = date_match.group()
 
+    # Extract numbers
     numbers = re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
     numbers = [float(n.replace(",", "")) for n in numbers]
 
-    debit, credit, balance = 0, 0, 0
-
-    # 🔥 CASE 1: 3 numbers → [debit, credit, balance]
-    if len(numbers) >= 3:
-        debit = numbers[-3]
-        credit = numbers[-2]
-        balance = numbers[-1]
-
-    # 🔥 CASE 2: 2 numbers → [amount, balance]
-    elif len(numbers) == 2:
-        txn = numbers[-2]
-        balance = numbers[-1]
-
-        lower = text.lower()
-
-        debit_keywords = [
-            "upi", "debit", "purchase", "amazon", "swiggy",
-            "payment", "paid", "withdrawal"
-        ]
-
-        credit_keywords = [
-            "credit", "deposit", "received", "refund", "imps"
-        ]
-
-        if any(k in lower for k in debit_keywords):
-            debit = txn
-        elif any(k in lower for k in credit_keywords):
-            credit = txn
-        else:
-            # fallback heuristic
-            if any(word in lower for word in ["store", "shop", "bookstore", "publishing"]):
-                debit = txn
-            else:
-                credit = txn
-
-    else:
+    if len(numbers) < 2:
         return None
 
-    # ---------------- CLEAN NAME ----------------
-    name = text
-    name = re.sub(r"\d{2}/\d{2}/\d{2}", "", name)
+    # Last number = balance
+    balance = numbers[-1]
+
+    # Second last = txn amount
+    amount = numbers[-2]
+
+    debit, credit = 0, 0
+
+    lower = text.lower()
+
+    if any(k in lower for k in ["imps", "deposit", "credit", "received", "refund"]):
+        credit = amount
+    elif any(k in lower for k in ["upi", "debit", "purchase", "payment", "withdrawal", "emi"]):
+        debit = amount
+    else:
+        # fallback → detect by balance movement later (optional)
+        debit = amount
+
+    # 🔥 CLEAN NAME (IMPORTANT)
+    name = re.sub(r"\d{2}/\d{2}/\d{2}", "", text)
     name = re.sub(r"\d{1,3}(?:,\d{3})*\.\d{2}", "", name)
-    name = re.sub(r"[^\w\s]", "", name)
-    name = " ".join(name.split())
+    name = re.sub(r"\d+", "", name)
+    name = re.sub(r"[^\w\s]", " ", name)
+    name = " ".join(name.split()).lower()
 
     if len(name) < 3:
         return None
-
-    # ---------------- DEBUG ----------------
-    print("----")
-    print("TEXT:", text)
-    print("NUMBERS:", numbers)
 
     return {
         "date": date,
@@ -86,8 +65,7 @@ def parse_row(text):
         "debit": debit,
         "credit": credit,
         "balance": balance,
-        "numbers": numbers,
-        "text": text.lower()
+        "text": name   # 🔥 use clean text only
     }
 
 # ---------------------------
@@ -102,36 +80,36 @@ async def upload(file: UploadFile = File(...)):
     doc = fitz.open(stream=content, filetype="pdf")
 
     lines = []
-
     for page in doc:
         text = page.get_text()
-        lines.extend(text.split("\n"))
+        lines.extend([l.strip() for l in text.split("\n") if l.strip()])
 
-    current_block = ""
+    blocks = []
+    current_block = []
 
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        # New transaction starts with date
+        # New transaction starts when line starts with date
         if re.match(r"\d{2}/\d{2}/\d{2}", line):
             if current_block:
-                parsed = parse_row(current_block)
-                if parsed:
-                    documents.append(parsed)
-
-            current_block = line
+                blocks.append(" ".join(current_block))
+            current_block = [line]
         else:
-            current_block += " " + line
+            current_block.append(line)
 
-    # Last block
     if current_block:
-        parsed = parse_row(current_block)
+        blocks.append(" ".join(current_block))
+
+    # 🔥 Parse blocks
+    for block in blocks:
+        parsed = parse_row(block)
         if parsed:
             documents.append(parsed)
 
+    print("TOTAL PARSED:", len(documents))
+    print("SAMPLE:", documents[:3])
+
     return {"message": f"{len(documents)} rows processed"}
+
 
 
 # ---------------------------
@@ -149,17 +127,12 @@ def search(q: str, debug: bool = False):
 
         score = max(
             fuzz.token_set_ratio(q, text),
-            fuzz.token_sort_ratio(q, text),
-            fuzz.partial_ratio(q, text)
+            fuzz.token_sort_ratio(q, text)
         )
 
-        if score > 45:
+        if score > 40:
             item = doc.copy()
             item["score"] = score
-
-            if not debug:
-                item.pop("numbers", None)
-
             results.append(item)
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -168,4 +141,4 @@ def search(q: str, debug: bool = False):
         "results": results,
         "total_credit": sum(r["credit"] for r in results)
     }
-
+    
