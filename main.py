@@ -29,22 +29,43 @@ def parse_row(text):
 
     debit, credit, balance = 0, 0, 0
 
-    if len(numbers) >= 2:
+    # 🔥 CASE 1: 3 numbers → [debit, credit, balance]
+    if len(numbers) >= 3:
+        debit = numbers[-3]
+        credit = numbers[-2]
         balance = numbers[-1]
+
+    # 🔥 CASE 2: 2 numbers → [amount, balance]
+    elif len(numbers) == 2:
         txn = numbers[-2]
+        balance = numbers[-1]
 
         lower = text.lower()
 
-        debit_keywords = ["upi", "debit", "purchase", "amazon", "swiggy", "payment", "paid"]
-        credit_keywords = ["credit", "deposit", "received", "refund", "imps"]
+        debit_keywords = [
+            "upi", "debit", "purchase", "amazon", "swiggy",
+            "payment", "paid", "withdrawal"
+        ]
+
+        credit_keywords = [
+            "credit", "deposit", "received", "refund", "imps"
+        ]
 
         if any(k in lower for k in debit_keywords):
             debit = txn
         elif any(k in lower for k in credit_keywords):
             credit = txn
         else:
-            credit = txn  # fallback
+            # fallback heuristic
+            if any(word in lower for word in ["store", "shop", "bookstore", "publishing"]):
+                debit = txn
+            else:
+                credit = txn
 
+    else:
+        return None
+
+    # ---------------- CLEAN NAME ----------------
     name = text
     name = re.sub(r"\d{2}/\d{2}/\d{2}", "", name)
     name = re.sub(r"\d{1,3}(?:,\d{3})*\.\d{2}", "", name)
@@ -54,19 +75,20 @@ def parse_row(text):
     if len(name) < 3:
         return None
 
+    # ---------------- DEBUG ----------------
     print("----")
     print("TEXT:", text)
     print("NUMBERS:", numbers)
 
     return {
-    "date": date,
-    "name": name,
-    "debit": debit,
-    "credit": credit,
-    "balance": balance,
-    "numbers": numbers,   # ✅ DEBUG FIELD
-    "text": text.lower()
-}
+        "date": date,
+        "name": name,
+        "debit": debit,
+        "credit": credit,
+        "balance": balance,
+        "numbers": numbers,
+        "text": text.lower()
+    }
 
 # ---------------------------
 # UPLOAD API
