@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 
-API_URL = "https://your-railway-url"
+API_URL = "https://aju2-production.up.railway.app"
 
 st.title("📊 Financial PDF Smart Search")
 
