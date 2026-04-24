@@ -1,7 +1,6 @@
 fastapi
 uvicorn
-PyMuPDF
+pandas
 rapidfuzz
 python-multipart
-pandas
-requests
+camelot-py[cv]
