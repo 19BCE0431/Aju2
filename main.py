@@ -4,127 +4,139 @@ import re
 from rapidfuzz import fuzz
 
 app = FastAPI()
-
 documents = []
 
 # ---------------------------
-# KEYWORD EXTRACTION
+# HELPERS
 # ---------------------------
-def extract_keywords(text):
-    words = re.findall(r"[a-zA-Z]+", text.lower())
 
-    stopwords = {
-        "upi","imps","neft","hdfc","bank","ltd","india",
-        "personal","etbank","mum","mumbai","txn","transfer",
-        "dr","cr","chq","pos","ref","no"
-    }
+def is_date(text):
+    return re.match(r"\d{2}/\d{2}/\d{2}", text)
 
-    keywords = [w for w in words if w not in stopwords and len(w) > 2]
-    return " ".join(keywords)
+def is_amount(text):
+    return re.match(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
 
+def clean_amount(x):
+    return float(x.replace(",", ""))
 
 # ---------------------------
-# PARSE TRANSACTION BLOCK
+# CORE PARSER (LAYOUT BASED)
 # ---------------------------
-def parse_row(text):
-    original_text = text
-    text = " ".join(text.split())
 
-    # Date
-    date_match = re.search(r"\d{2}/\d{2}/\d{2}", text)
-    if not date_match:
-        return None
+def extract_transactions(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    rows = []
 
-    date = date_match.group()
+    for page in doc:
+        words = page.get_text("words")  
+        # words = [x0, y0, x1, y1, "text", block_no, line_no, word_no]
 
-    # Numbers
-    numbers = re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
-    numbers = [float(n.replace(",", "")) for n in numbers]
+        # Sort by vertical position
+        words.sort(key=lambda w: (round(w[1], 1), w[0]))
 
-    if len(numbers) < 2:
-        return None
+        # Group into lines (same Y ≈ same row)
+        lines = {}
+        for w in words:
+            y = round(w[1], 1)
+            lines.setdefault(y, []).append(w)
 
-    balance = numbers[-1]
-    amount = numbers[-2]
+        # Convert to sorted rows
+        sorted_lines = [lines[k] for k in sorted(lines.keys())]
 
-    debit, credit = 0, 0
-    lower = text.lower()
+        current = None
 
-    if any(k in lower for k in ["deposit", "credit", "received"]):
-        credit = amount
-    elif any(k in lower for k in ["atm", "debit", "purchase", "payment", "emi"]):
-        debit = amount
-    elif "imps" in lower or "neft" in lower:
-        credit = amount  # usually incoming
-    else:
-        debit = amount  # fallback
+        for line in sorted_lines:
+            texts = [w[4] for w in sorted(line, key=lambda x: x[0])]
+            line_text = " ".join(texts)
 
-    # Clean name
-    name = re.sub(r"\d{2}/\d{2}/\d{2}", "", text)
-    name = re.sub(r"\d{1,3}(?:,\d{3})*\.\d{2}", "", name)
-    name = re.sub(r"\d+", "", name)
-    name = re.sub(r"[^\w\s]", " ", name)
-    name = " ".join(name.split()).lower()
+            # New transaction starts
+            if any(is_date(t) for t in texts):
+                if current:
+                    rows.append(current)
 
-    if len(name) < 3:
-        return None
+                current = {
+                    "date": next(t for t in texts if is_date(t)),
+                    "desc_parts": [],
+                    "amounts": []
+                }
 
-    return {
-        "date": date,
-        "name": name,
-        "debit": debit,
-        "credit": credit,
-        "balance": balance,
-        "raw_text": original_text.lower(),
-        "text": name,
-        "keywords": extract_keywords(original_text)
-    }
+            if not current:
+                continue
+
+            # Collect amounts
+            amounts = [clean_amount(t) for t in texts if is_amount(t)]
+            current["amounts"].extend(amounts)
+
+            # Collect description (exclude numbers + dates)
+            desc = [
+                t for t in texts
+                if not is_date(t) and not is_amount(t)
+            ]
+            if desc:
+                current["desc_parts"].extend(desc)
+
+        if current:
+            rows.append(current)
+
+    # ---------------------------
+    # FINAL STRUCTURED ROWS
+    # ---------------------------
+    final = []
+
+    for r in rows:
+        nums = r["amounts"]
+
+        if len(nums) < 2:
+            continue
+
+        balance = nums[-1]
+        amount = nums[-2]
+
+        # Debit/Credit detection using balance change is ideal,
+        # but fallback heuristic:
+        debit, credit = 0, 0
+        if "cr" in " ".join(r["desc_parts"]).lower():
+            credit = amount
+        else:
+            debit = amount
+
+        name = " ".join(r["desc_parts"]).lower()
+        name = re.sub(r"[^\w\s]", " ", name)
+        name = " ".join(name.split())
+
+        final.append({
+            "date": r["date"],
+            "name": name,
+            "debit": debit,
+            "credit": credit,
+            "balance": balance,
+            "raw_text": name
+        })
+
+    return final
 
 
 # ---------------------------
-# UPLOAD API
+# UPLOAD
 # ---------------------------
+
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
     global documents
-    documents = []
 
     content = await file.read()
-    doc = fitz.open(stream=content, filetype="pdf")
+    documents = extract_transactions(content)
 
-    lines = []
-    for page in doc:
-        text = page.get_text()
-        lines.extend([l.strip() for l in text.split("\n") if l.strip()])
-
-    blocks = []
-    current_block = []
-
-    for line in lines:
-        if re.match(r"\d{2}/\d{2}/\d{2}", line):
-            if current_block:
-                blocks.append(" ".join(current_block))
-            current_block = [line]
-        else:
-            current_block.append(line)
-
-    if current_block:
-        blocks.append(" ".join(current_block))
-
-    for block in blocks:
-        parsed = parse_row(block)
-        if parsed:
-            documents.append(parsed)
-
-    print("TOTAL PARSED:", len(documents))
-    print("SAMPLE:", documents[:3])
+    print("PARSED:", len(documents))
+    print("SAMPLE:", documents[:2])
 
     return {"message": f"{len(documents)} rows processed"}
 
 
 # ---------------------------
-# SEARCH API (SMART)
+# SEARCH (CLEAN + RELIABLE)
 # ---------------------------
+
 @app.get("/search")
 def search(q: str):
     q = re.sub(r"[^a-zA-Z ]", "", q.lower())
@@ -133,32 +145,16 @@ def search(q: str):
     results = []
 
     for doc in documents:
-        raw = doc.get("raw_text", "")
-        clean = doc.get("text", "")
-        keywords = doc.get("keywords", "")
+        text = doc["raw_text"]
 
-        score = 0
+        score = max(
+            fuzz.token_set_ratio(q, text),
+            fuzz.partial_ratio(q, text)
+        )
 
-        # 1. Exact match boost
-        if q in raw:
-            score += 100
-
-        # 2. Keyword match (strong)
-        score += fuzz.token_set_ratio(q, keywords) * 0.8
-
-        # 3. Clean text
-        score += fuzz.token_set_ratio(q, clean) * 0.5
-
-        # 4. Partial fallback
-        score += fuzz.partial_ratio(q, raw) * 0.3
-
-        # 5. Token boost
-        if any(word in keywords for word in q.split()):
-            score += 30
-
-        if score > 40:
+        if score > 50:
             item = doc.copy()
-            item["score"] = round(score, 2)
+            item["score"] = score
             results.append(item)
 
     results.sort(key=lambda x: x["score"], reverse=True)
