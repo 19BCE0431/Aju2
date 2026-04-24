@@ -1,131 +1,112 @@
 from fastapi import FastAPI, UploadFile, File
-import fitz  # PyMuPDF
+import pandas as pd
 import re
+import camelot
 from rapidfuzz import fuzz
+import tempfile
+import os
 
 app = FastAPI()
 documents = []
 
 # ---------------------------
-# HELPERS
+# CLEAN HELPERS
 # ---------------------------
-
-def is_date(text):
-    return re.match(r"\d{2}/\d{2}/\d{2}", text)
-
-def is_amount(text):
-    return re.match(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
 
 def clean_amount(x):
-    return float(x.replace(",", ""))
+    try:
+        return float(str(x).replace(",", "").strip())
+    except:
+        return 0.0
+
+def clean_text(x):
+    x = str(x).lower()
+    x = re.sub(r"[^\w\s]", " ", x)
+    return " ".join(x.split())
+
 
 # ---------------------------
-# CORE PARSER (LAYOUT BASED)
+# TABLE EXTRACTION (MAIN LOGIC)
 # ---------------------------
 
-def extract_transactions(pdf_bytes):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    rows = []
+def extract_tables(pdf_path):
+    tables = camelot.read_pdf(pdf_path, pages="all", flavor="stream")
 
-    for page in doc:
-        words = page.get_text("words")  
-        # words = [x0, y0, x1, y1, "text", block_no, line_no, word_no]
+    all_rows = []
 
-        # Sort by vertical position
-        words.sort(key=lambda w: (round(w[1], 1), w[0]))
+    for table in tables:
+        df = table.df
 
-        # Group into lines (same Y ≈ same row)
-        lines = {}
-        for w in words:
-            y = round(w[1], 1)
-            lines.setdefault(y, []).append(w)
+        # Normalize columns (remove empty rows)
+        df = df.replace("", pd.NA).dropna(how="all")
 
-        # Convert to sorted rows
-        sorted_lines = [lines[k] for k in sorted(lines.keys())]
+        # Try to identify columns dynamically
+        for _, row in df.iterrows():
+            row = [str(x).strip() for x in row.tolist()]
 
-        current = None
+            text = " ".join(row)
 
-        for line in sorted_lines:
-            texts = [w[4] for w in sorted(line, key=lambda x: x[0])]
-            line_text = " ".join(texts)
-
-            # New transaction starts
-            if any(is_date(t) for t in texts):
-                if current:
-                    rows.append(current)
-
-                current = {
-                    "date": next(t for t in texts if is_date(t)),
-                    "desc_parts": [],
-                    "amounts": []
-                }
-
-            if not current:
+            # detect date
+            date_match = re.search(r"\d{2}/\d{2}/\d{2}", text)
+            if not date_match:
                 continue
 
-            # Collect amounts
-            amounts = [clean_amount(t) for t in texts if is_amount(t)]
-            current["amounts"].extend(amounts)
+            date = date_match.group()
 
-            # Collect description (exclude numbers + dates)
-            desc = [
-                t for t in texts
-                if not is_date(t) and not is_amount(t)
-            ]
-            if desc:
-                current["desc_parts"].extend(desc)
+            # extract amounts
+            nums = re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
+            nums = [clean_amount(n) for n in nums]
 
-        if current:
-            rows.append(current)
+            if len(nums) < 2:
+                continue
 
-    # ---------------------------
-    # FINAL STRUCTURED ROWS
-    # ---------------------------
-    final = []
+            balance = nums[-1]
+            amount = nums[-2]
 
-    for r in rows:
-        nums = r["amounts"]
+            desc = clean_text(text)
 
-        if len(nums) < 2:
-            continue
+            # debit/credit logic
+            debit, credit = 0, 0
 
-        balance = nums[-1]
-        amount = nums[-2]
+            if "cr" in desc or "deposit" in desc:
+                credit = amount
+            elif "atm" in desc or "withdraw" in desc:
+                debit = amount
+            elif "imps" in desc or "neft" in desc:
+                credit = amount
+            else:
+                debit = amount
 
-        # Debit/Credit detection using balance change is ideal,
-        # but fallback heuristic:
-        debit, credit = 0, 0
-        if "cr" in " ".join(r["desc_parts"]).lower():
-            credit = amount
-        else:
-            debit = amount
+            all_rows.append({
+                "date": date,
+                "name": desc,
+                "debit": debit,
+                "credit": credit,
+                "balance": balance,
+                "raw_text": desc
+            })
 
-        name = " ".join(r["desc_parts"]).lower()
-        name = re.sub(r"[^\w\s]", " ", name)
-        name = " ".join(name.split())
-
-        final.append({
-            "date": r["date"],
-            "name": name,
-            "debit": debit,
-            "credit": credit,
-            "balance": balance,
-            "raw_text": name
-        })
-
-    return final
+    return all_rows
 
 
 # ---------------------------
-# UPLOAD
+# UPLOAD API
 # ---------------------------
 
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
     global documents
+    documents = []
 
-    content = await file.read()
-    documents = extract_transactions(content)
+    # save temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    try:
+        documents = extract_tables(tmp_path)
+    finally:
+        os.remove(tmp_path)
 
     print("PARSED:", len(documents))
     print("SAMPLE:", documents[:2])
@@ -134,13 +115,12 @@ async def upload(file: UploadFile = File(...)):
 
 
 # ---------------------------
-# SEARCH (CLEAN + RELIABLE)
+# SEARCH API
 # ---------------------------
 
 @app.get("/search")
 def search(q: str):
-    q = re.sub(r"[^a-zA-Z ]", "", q.lower())
-    q = " ".join(q.split())
+    q = clean_text(q)
 
     results = []
 
