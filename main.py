@@ -1,123 +1,111 @@
 from fastapi import FastAPI, UploadFile, File
-import pandas as pd
+import fitz  # PyMuPDF
 import re
-import camelot
 from rapidfuzz import fuzz
-import tempfile
-import os
 
 app = FastAPI()
+
 documents = []
 
 # ---------------------------
-# CLEAN HELPERS
+# CLEAN TEXT
 # ---------------------------
-
-def clean_amount(x):
-    try:
-        return float(str(x).replace(",", "").strip())
-    except:
-        return 0.0
-
 def clean_text(x):
-    x = str(x).lower()
+    x = x.lower()
     x = re.sub(r"[^\w\s]", " ", x)
     return " ".join(x.split())
 
 
 # ---------------------------
-# TABLE EXTRACTION (MAIN LOGIC)
+# PARSE PDF (STABLE VERSION)
 # ---------------------------
+def parse_pdf(content):
+    doc = fitz.open(stream=content, filetype="pdf")
 
-def extract_tables(pdf_path):
-    tables = camelot.read_pdf(pdf_path, pages="all", flavor="stream")
+    lines = []
 
-    all_rows = []
+    for page in doc:
+        text = page.get_text()
+        lines.extend([l.strip() for l in text.split("\n") if l.strip()])
 
-    for table in tables:
-        df = table.df
+    transactions = []
+    current = ""
 
-        # Normalize columns (remove empty rows)
-        df = df.replace("", pd.NA).dropna(how="all")
+    for line in lines:
+        # new transaction starts with date
+        if re.match(r"\d{2}/\d{2}/\d{2}", line):
+            if current:
+                transactions.append(current)
+            current = line
+        else:
+            current += " " + line
 
-        # Try to identify columns dynamically
-        for _, row in df.iterrows():
-            row = [str(x).strip() for x in row.tolist()]
+    if current:
+        transactions.append(current)
 
-            text = " ".join(row)
+    final = []
 
-            # detect date
-            date_match = re.search(r"\d{2}/\d{2}/\d{2}", text)
-            if not date_match:
-                continue
+    for t in transactions:
+        text = t
 
-            date = date_match.group()
+        # date
+        date_match = re.search(r"\d{2}/\d{2}/\d{2}", text)
+        if not date_match:
+            continue
 
-            # extract amounts
-            nums = re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
-            nums = [clean_amount(n) for n in nums]
+        date = date_match.group()
 
-            if len(nums) < 2:
-                continue
+        # amounts
+        nums = re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", text)
+        nums = [float(n.replace(",", "")) for n in nums]
 
-            balance = nums[-1]
-            amount = nums[-2]
+        if len(nums) < 2:
+            continue
 
-            desc = clean_text(text)
+        balance = nums[-1]
+        amount = nums[-2]
 
-            # debit/credit logic
-            debit, credit = 0, 0
+        # description = KEEP FULL TEXT (key fix)
+        desc = clean_text(text)
 
-            if "cr" in desc or "deposit" in desc:
-                credit = amount
-            elif "atm" in desc or "withdraw" in desc:
-                debit = amount
-            elif "imps" in desc or "neft" in desc:
-                credit = amount
-            else:
-                debit = amount
+        # simple debit/credit
+        debit, credit = 0, 0
+        if any(k in desc for k in ["deposit", "credit", "cr"]):
+            credit = amount
+        elif any(k in desc for k in ["atm", "withdraw", "purchase"]):
+            debit = amount
+        elif any(k in desc for k in ["imps", "neft"]):
+            credit = amount
+        else:
+            debit = amount
 
-            all_rows.append({
-                "date": date,
-                "name": desc,
-                "debit": debit,
-                "credit": credit,
-                "balance": balance,
-                "raw_text": desc
-            })
+        final.append({
+            "date": date,
+            "description": desc,
+            "debit": debit,
+            "credit": credit,
+            "balance": balance
+        })
 
-    return all_rows
+    return final
 
 
 # ---------------------------
 # UPLOAD API
 # ---------------------------
-
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
     global documents
-    documents = []
 
-    # save temp file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
+    content = await file.read()
+    documents = parse_pdf(content)
 
-    try:
-        documents = extract_tables(tmp_path)
-    finally:
-        os.remove(tmp_path)
-
-    print("PARSED:", len(documents))
-    print("SAMPLE:", documents[:2])
-
-    return {"message": f"{len(documents)} rows processed"}
+    return {"message": f"{len(documents)} transactions loaded"}
 
 
 # ---------------------------
 # SEARCH API
 # ---------------------------
-
 @app.get("/search")
 def search(q: str):
     q = clean_text(q)
@@ -125,7 +113,7 @@ def search(q: str):
     results = []
 
     for doc in documents:
-        text = doc["raw_text"]
+        text = doc["description"]
 
         score = max(
             fuzz.token_set_ratio(q, text),
@@ -143,3 +131,11 @@ def search(q: str):
         "results": results[:20],
         "total_credit": sum(r["credit"] for r in results)
     }
+
+
+# ---------------------------
+# HEALTH CHECK (IMPORTANT)
+# ---------------------------
+@app.get("/")
+def root():
+    return {"status": "ok"}
