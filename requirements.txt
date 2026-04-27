@@ -4,3 +4,4 @@ pandas
 rapidfuzz
 python-multipart
 camelot-py[cv]
+PyMuPDF
